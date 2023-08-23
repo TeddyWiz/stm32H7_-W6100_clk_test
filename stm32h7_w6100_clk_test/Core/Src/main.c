@@ -33,6 +33,7 @@
 /* USER CODE BEGIN PTD */
 #define True_STD
 #define SPI_DMA
+#define Send_data_size 	 7300//16000//10000
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -78,8 +79,8 @@ wiz_NetInfo gWIZNETINFO = { .mac = {0x00,0x08,0xdc,0xff,0xff,0xff},
 							};
 
 
-uint8_t WIZ_Dest_IP[4] = {192, 168, 50, 59};                  //DST_IP Address
-
+uint8_t WIZ_Dest_IP[4] = {192, 168, 15, 7};                  //DST_IP Address
+uint16_t WIZ_Dest_PORT = 5002;
 
 uint8_t DestIP6_L[16] = {0xfe,0x80, 0x00,0x00,
 						  0x00,0x00, 0x00,0x00,
@@ -98,7 +99,7 @@ uint8_t Router_IP[16]= {0xff,0x02,0x00,0x00,
                           0x00,0x00,0x00,0x00,
                           0x00,0x00,0x00,0x02
                          };
-uint8_t data_buf[2048];
+uint8_t data_buf[16384];
 uint8_t SPI_DMA_flag = 0;
 void W6100Initialze(void);
 void print_network_information(void);
@@ -112,6 +113,10 @@ static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 uint8_t rxData;
+uint8_t rx_buffer[2048]= {0,};
+int rx_index = 0;
+uint8_t rx_flag =0;
+uint16_t loop_mode = 0;
 #ifdef KEIL
      #ifdef __GNUC__
      //With GCC, small printf (option LD Linker->Libraries->Small printf
@@ -144,6 +149,28 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
        loop back received data
      */
      HAL_UART_Receive_IT(&huart2, &rxData, 1);
+     if (rxData == '\n')
+	 {
+	   if (rx_buffer[rx_index - 1] == '\r')
+	   {
+		 rx_index--;
+		 rx_flag = 1;
+		 rx_buffer[rx_index] = 0;
+	   }
+	   else
+	   {
+		 rx_index = 0;
+		 HAL_UART_Transmit(&huart2, "not support format\r\n", 20, 1000);
+	   }
+	 }
+	 else if (rxData == 0x08) // back space
+	 {
+	   rx_index--;
+	 }
+	 else
+	 {
+	   rx_buffer[rx_index++] = rxData;
+	 }
      HAL_UART_Transmit(&huart2, &rxData, 1, 1000);
 }
 
@@ -195,6 +222,9 @@ uint8_t dma_read_data(uint32_t address, uint8_t *buff, uint16_t len)
 	//free(pbuf);
 	return len;
 }
+
+void print_help_menu(void);
+uint16_t CLI_Process(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -209,8 +239,14 @@ uint8_t dma_read_data(uint32_t address, uint8_t *buff, uint16_t len)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+	int i = 0;
 	uint8_t syslock = SYS_NET_LOCK;
 	uint8_t temp_ver[2]={0,};
+	PLL2_ClocksTypeDef PLL2_Clk_data;
+	uint16_t temp_presc = 1, temp_presc_set, temp_presc_cnt = 0;
+	uint16_t cmd_mode=0;
+	int8_t *data= NULL;
+	int32_t ret;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -237,25 +273,76 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_UART_Receive_IT(&huart2, &rxData, 1);
   printf("< W6100 clock TEST!! >\r\n");
+  HAL_RCCEx_GetPLL2ClockFreq(&PLL2_Clk_data);
+    printf("SET PLL2 P:%ld, Q:%ld, R:%ld \r\n", PLL2_Clk_data.PLL2_P_Frequency, PLL2_Clk_data.PLL2_Q_Frequency, PLL2_Clk_data.PLL2_R_Frequency);
+    temp_presc_set = (hspi1.Init.BaudRatePrescaler>>(4*7));
+    printf("pre = %d\r\n", temp_presc_set);
+    for(temp_presc_cnt = 0; temp_presc_cnt < temp_presc_set; temp_presc_cnt++)
+    {
+    	temp_presc = temp_presc*2;
+    }
+    printf("SPI CLK %d Mhz \r\n", (int)(PLL2_Clk_data.PLL2_P_Frequency / 2*temp_presc / 1000000));
 	dma_read_data(0x000200, temp_ver, 2);
 	printf("VER 0x%02X %02X\r\n", temp_ver[0], temp_ver[1]);
 	W6100Initialze();
 	ctlwizchip(CW_SYS_UNLOCK,& syslock);
 	ctlnetwork(CN_SET_NETINFO,&gWIZNETINFO);
-
+	for (i = 0; i < 8; i++)
+	  {
+		printf("%d : max size = %d k \r\n", i, getSn_TxMAX(i));
+	  }
 	printf("VERSION(%x) = %.2x \r\n", _VER_,getVER());
 	print_network_information();
+	printf("\r\n>");
+	data = (uint8_t *)calloc(Send_data_size + 1, sizeof(uint8_t));
+	  for(i=0; i<Send_data_size; i++)
+	  {
+		  data[i] = (i%10) + '0';
+	  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  loopback_tcps(0,data_buf,5000, AS_IPV4);
+	  if (rx_flag == 1)
+	  {
+		  rx_flag = 0;
+		  cmd_mode=CLI_Process();
+		  switch(cmd_mode)
+		  {
+		  case 3:
+			  break;
+		  default :
+			  break;
+		  }
+	  }
+
+	  switch(loop_mode)
+	  {
+	  case 1:	//loopback
+		  loopback_tcps(0,data_buf,5000, AS_IPV4);
+		  break;
+	  case 2:
+		  ret = iperf_tcpc(0, data, WIZ_Dest_IP, WIZ_Dest_PORT, Send_data_size, 100, AS_IPV4);
+		  if(ret > 1)
+		  {
+			  loop_mode = 0;
+			  printf("finish iperf send data[%ld] \r\n", ret);
+		  }
+		  break;
+	  case 3:
+		  tcps_status(0, 5000, AS_IPV4);
+		  break;
+	  default :
+		  break;
+	  }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   }
+  free(data);
   /* USER CODE END 3 */
 }
 
@@ -429,9 +516,6 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
-  /* DMAMUX1_OVR_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMAMUX1_OVR_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMAMUX1_OVR_IRQn);
 
 }
 
@@ -544,7 +628,8 @@ void W6100Initialze(void)
 	#endif
 #endif
 	uint8_t temp;
-	unsigned char W6100_AdrSet[2][8] = {{2, 2, 2, 2, 2, 2, 2, 2}, {2, 2, 2, 2, 2, 2, 2, 2}};
+	//unsigned char W6100_AdrSet[2][8] = {{2, 2, 2, 2, 2, 2, 2, 2}, {2, 2, 2, 2, 2, 2, 2, 2}};
+	unsigned char W6100_AdrSet[2][8] = {{16, 0, 0, 0, 0, 0, 0, 0}, {16, 0, 0, 0, 0, 0, 0, 0}};
 	do
 	{
 		if (ctlwizchip(CW_GET_PHYLINK, (void *)&temp) == -1)
@@ -591,6 +676,46 @@ void print_network_information(void)
 									gWIZNETINFO.gw6[4],gWIZNETINFO.gw6[5],gWIZNETINFO.gw6[6],gWIZNETINFO.gw6[7],\
 									gWIZNETINFO.gw6[8],gWIZNETINFO.gw6[9],gWIZNETINFO.gw6[10],gWIZNETINFO.gw6[11],\
 									gWIZNETINFO.gw6[12],gWIZNETINFO.gw6[13],gWIZNETINFO.gw6[14],gWIZNETINFO.gw6[15]);
+}
+
+void print_help_menu(void)
+{
+  printf("CMD List\r\n");
+}
+uint16_t CLI_Process(void)
+{
+  uint16_t mode = 0;
+  printf("serial recv : [%d] %s\r\n", rx_index, rx_buffer);
+  if (strncmp((const char *)rx_buffer, (const char *)"help", 4) == 0) // spi setting
+  {
+	  printf("help\r\n");
+  }
+  else if (strncmp((const char *)rx_buffer, (const char *)"stop", 4) == 0) // spi setting
+  {
+	  printf("stop\r\n");
+	  close(0);
+	  loop_mode = 0;
+  }
+  else if (strncmp((const char *)rx_buffer, (const char *)"1", 1) == 0) // spi setting
+  {
+	  printf("echo\r\n");
+	  loop_mode = 1;
+  }
+  else if (strncmp((const char *)rx_buffer, (const char *)"2", 1) == 0) // spi setting
+  {
+	 printf("iperf client\r\n");
+	 loop_mode = 2;
+	 mode = 2;
+  }
+  else if (strncmp((const char *)rx_buffer, (const char *)"3", 1) == 0) // spi setting
+	{
+	 printf("iperf server\r\n");
+	 loop_mode = 3;
+	 mode = 3;
+	}
+  rx_index = 0;
+  HAL_UART_Transmit(&huart2, (uint8_t *)">", 1, 0xFFFF);
+  return mode;
 }
 /* USER CODE END 4 */
 
